@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { FastifyRequest } from 'fastify';
@@ -9,6 +9,7 @@ import pdfParse from 'pdf-parse';
 import { Course, CourseDocument, CourseStatus,} from './schemas/course.entity';
 
 import { SourceType, TargetAudience, } from './dto/create-course.dto';
+import { UpdateCourseDto } from './dto/update-course.dto';
 
 interface ParsedCourseRequest {
   courseTitle: string;
@@ -438,8 +439,61 @@ export class CoursesService {
     }
   }
 
+  async findById(id: string) {
+    const course = await this.courseModel.findById(id, {source: 0}).exec();
+    if (!course) {
+      throw new NotFoundException('Course not found');
+    }
+    return course;
+  }
+
   async findAll() {
     const courses = await this.courseModel.find({}, {source: 0}).exec();
     return courses;
+  }
+
+  async update(courseId: string, dto: UpdateCourseDto) {
+    const course = await this.courseModel.findById(courseId).exec();
+
+    if (!course) {
+      throw new NotFoundException('Course not found');
+    }
+
+    if (dto.courseTitle !== undefined) {
+      const NewTitle = dto.courseTitle.trim();
+
+      if (NewTitle !== course.courseTitle) {
+        const duplicate = await this.courseModel.exists({
+          courseTitle: NewTitle,
+          _id: { $ne: courseId },
+        });
+
+        if (duplicate) {
+          throw new BadRequestException(`Course with title "${NewTitle}" already exists`);
+        }
+      }
+
+      course.courseTitle = NewTitle;
+    }
+
+    if (dto.learningObjectives !== undefined) {
+      course.learningObjectives = dto.learningObjectives;
+    }
+
+    try {
+      await course.save();
+
+      return {
+        success: true,
+        message: 'Course updated successfully',
+        course,
+      };
+    } catch (error: any) {
+      if (error?.code === 11000) {
+        throw new BadRequestException('A course with this title already exists');
+      }
+
+      throw error;
+    }
   }
 }

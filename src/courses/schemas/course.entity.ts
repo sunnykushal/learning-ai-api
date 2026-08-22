@@ -38,8 +38,8 @@ export class Module {
   @Prop({ required: true })
   title: string;
 
-  @Prop({ type: [String], default: [] })
-  learningObjectives: string[];
+  // @Prop({ type: [String], default: [] })
+  // learningObjectives: string[];
 
   @Prop()
   summary?: string;
@@ -74,6 +74,9 @@ export class Course {
     type: Source,
   })
   source: Source;
+
+  @Prop({ type: [String], default: [] })
+  learningObjectives: string[];
 
   @Prop({
     type: [Module],
