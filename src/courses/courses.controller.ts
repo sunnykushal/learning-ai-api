@@ -27,5 +27,12 @@ export class CoursesController {
   update(@Param('id') id: string, @Body() updateCourseDto: UpdateCourseDto) {
     return this.coursesService.update(id, updateCourseDto);
   }
+
+  @Patch(':courseId/approve')
+  async approveCourse(
+    @Param('courseId') courseId: string,
+  ) {
+    return this.coursesService.approveCourse(courseId,);
+  }
   
 }

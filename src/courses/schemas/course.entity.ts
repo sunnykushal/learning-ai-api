@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument } from 'mongoose';
+import { HydratedDocument, Types } from 'mongoose';
 import { SourceType, TargetAudience } from '../dto/create-course.dto';
 
 export type CourseDocument = HydratedDocument<Course>;
@@ -8,6 +8,12 @@ export enum CourseStatus {
   DRAFT = 'DRAFT',
   PROCESSING = 'PROCESSING',
   READY_FOR_REVIEW = 'READY_FOR_REVIEW',
+  APPROVED = 'APPROVED',
+  FAILED = 'FAILED',
+}
+
+export enum ModuleStatus {
+  REVIEW = 'REVIEW',
   APPROVED = 'APPROVED',
   FAILED = 'FAILED',
 }
@@ -30,8 +36,10 @@ export class Source {
   extractedText?: string;
 }
 
-@Schema({ _id: false })
+@Schema()
 export class Module {
+  _id: Types.ObjectId;
+  
   @Prop({ required: true })
   order: number;
 
@@ -49,6 +57,13 @@ export class Module {
 
   @Prop({ type: [Object], default: [] })
   knowledgeChecks: Record<string, any>[];
+
+  @Prop({
+    required: true,
+    enum: ModuleStatus,
+    default: ModuleStatus.REVIEW,
+  })
+  status: ModuleStatus;
 }
 
 @Schema({ timestamps: true })

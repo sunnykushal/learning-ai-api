@@ -6,7 +6,7 @@ import { mkdir, writeFile, readFile } from 'fs/promises';
 import { join } from 'path';
 import pdfParse from 'pdf-parse';
 
-import { Course, CourseDocument, CourseStatus,} from './schemas/course.entity';
+import { Course, CourseDocument, CourseStatus, ModuleStatus,} from './schemas/course.entity';
 
 import { SourceType, TargetAudience, } from './dto/create-course.dto';
 import { UpdateCourseDto } from './dto/update-course.dto';
@@ -453,7 +453,7 @@ export class CoursesService {
   }
 
   async update(courseId: string, dto: UpdateCourseDto) {
-    const course = await this.courseModel.findById(courseId).exec();
+    const course = await this.courseModel.findById(courseId, {source: 0}).exec();
 
     if (!course) {
       throw new NotFoundException('Course not found');
@@ -495,5 +495,34 @@ export class CoursesService {
 
       throw error;
     }
+  }
+
+  async approveCourse(courseId: string) {
+    const course = await this.courseModel.findById(courseId, {source: 0}).exec();
+
+    if (!course) {
+      throw new NotFoundException('Course not found',);
+    }
+
+    if (!course.modules.length) {
+      throw new BadRequestException('Course has no modules',);
+    }
+
+    const hasUnapprovedModule =
+      course.modules.some((module) =>module.status !== ModuleStatus.APPROVED,);
+
+    if (hasUnapprovedModule) {
+      throw new BadRequestException('All modules must be approved before publishing the course');
+    }
+
+    course.status = CourseStatus.APPROVED;
+
+    await course.save();
+
+    return {
+      success: true,
+      message: 'Course approved and published successfully',
+      course,
+    };
   }
 }
