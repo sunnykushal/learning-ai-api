@@ -10,6 +10,7 @@ import { Course, CourseDocument, CourseStatus, ModuleStatus,} from './schemas/co
 
 import { SourceType, TargetAudience, } from './dto/create-course.dto';
 import { UpdateCourseDto } from './dto/update-course.dto';
+import { AiService } from 'src/ai/ai.service';
 
 interface ParsedCourseRequest {
   courseTitle: string;
@@ -36,6 +37,7 @@ export class CoursesService {
   constructor(
     @InjectModel(Course.name)
     private readonly courseModel: Model<CourseDocument>,
+    private readonly openAIService: AiService,
   ) {}
 
   async generateCourse(request: FastifyRequest) {
@@ -260,21 +262,20 @@ export class CoursesService {
     const filePath =
       await this.saveUploadedFile(file);
 
-    /*
-     * TODO:
-     *
-     * Send the audio file to a
-     * Speech-to-Text model.
-     *
-     * Example:
-     *
-     * const extractedText =
-     *   await this.transcribeAudio(filePath);
-     */
+    const extractedText =await this.openAIService.transcribeAudio(filePath,);
 
-    throw new BadRequestException(
-      'Audio transcription is not implemented yet',
-    );
+    if (!extractedText) {
+      throw new BadRequestException(
+        'No readable speech found in audio',
+      );
+    }
+
+    return {
+      type: SourceType.AUDIO,
+      fileName: file.fileName,
+      filePath,
+      extractedText,
+    };
   }
 
   private validateAudioFile(
