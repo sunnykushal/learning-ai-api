@@ -1,6 +1,5 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import { Body, Controller, Delete, Param, Patch } from '@nestjs/common';
 import { ModulesService } from './modules.service';
-import { CreateModuleDto } from './dto/create-module.dto';
 import { UpdateModuleDto } from './dto/update-module.dto';
 
 @Controller('modules')
@@ -11,9 +10,13 @@ export class ModulesController {
   update(
     @Param('courseId') courseId: string,
     @Param('moduleId') moduleId: string,
-    @Body() updateModuleDto: UpdateModuleDto
+    @Body() updateModuleDto: UpdateModuleDto,
   ) {
-    return this.modulesService.updateModule(courseId, moduleId, updateModuleDto);
+    return this.modulesService.updateModule(
+      courseId,
+      moduleId,
+      updateModuleDto,
+    );
   }
 
   @Patch(':courseId/modules/:moduleId/approve')
@@ -21,13 +24,19 @@ export class ModulesController {
     @Param('courseId') courseId: string,
     @Param('moduleId') moduleId: string,
   ) {
-    return this.modulesService.approveModule(courseId,moduleId,);
+    return this.modulesService.approveModule(courseId, moduleId);
+  }
+
+  @Patch(':courseId/modules/:moduleId/regenerate')
+  async regenerateModule(
+    @Param('courseId') courseId: string,
+    @Param('moduleId') moduleId: string,
+  ) {
+    return this.modulesService.regenerateModule(courseId, moduleId);
   }
 
   @Delete('/courses/:courseId/modules/:moduleId')
-  remove(
-    @Param('moduleId') moduleId: string
-  ) {
+  remove(@Param('moduleId') moduleId: string) {
     return this.modulesService.remove(moduleId);
   }
 }

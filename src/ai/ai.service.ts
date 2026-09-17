@@ -1,7 +1,4 @@
-import {
-  Injectable,
-  InternalServerErrorException,
-} from '@nestjs/common';
+import { Injectable, InternalServerErrorException } from '@nestjs/common';
 
 import OpenAI from 'openai';
 import { createReadStream } from 'fs';
@@ -16,7 +13,7 @@ export class AiService {
     });
   }
 
-  async transcribeAudio(filePath: string,): Promise<string> {
+  async transcribeAudio(filePath: string): Promise<string> {
     try {
       const transcription = await this.openai.audio.transcriptions.create({
         file: createReadStream(filePath),

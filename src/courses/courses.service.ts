@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException, } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { FastifyRequest } from 'fastify';
@@ -6,11 +10,17 @@ import { mkdir, writeFile, readFile } from 'fs/promises';
 import { join } from 'path';
 import pdfParse from 'pdf-parse';
 
-import { Course, CourseDocument, CourseStatus, ModuleStatus,} from './schemas/course.entity';
+import {
+  Course,
+  CourseDocument,
+  CourseStatus,
+  ModuleStatus,
+} from './schemas/course.entity';
 
-import { SourceType, TargetAudience, } from './dto/create-course.dto';
+import { SourceType, TargetAudience } from './dto/create-course.dto';
 import { UpdateCourseDto } from './dto/update-course.dto';
 import { AiService } from 'src/ai/ai.service';
+import { LlmService } from './llm.service';
 
 interface ParsedCourseRequest {
   courseTitle: string;
@@ -38,26 +48,31 @@ export class CoursesService {
     @InjectModel(Course.name)
     private readonly courseModel: Model<CourseDocument>,
     private readonly openAIService: AiService,
+    private readonly llmService: LlmService,
   ) {}
 
-  async generateCourse(request: FastifyRequest) {
-    const courseRequest =
-      await this.parseMultipartRequest(request);
+  async generateCourse(request: FastifyRequest): Promise<unknown> {
+    const courseRequest = await this.parseMultipartRequest(request);
 
-    await this.validateCourseTitle(
-      courseRequest.courseTitle,
-    );
+    await this.validateCourseTitle(courseRequest.courseTitle);
 
     this.validateCourseRequest(courseRequest);
 
-    const processedSource =
-      await this.processSource(courseRequest);
+    const processedSource = await this.processSource(courseRequest);
 
-    const course =
-      await this.createCourse(
-        courseRequest,
-        processedSource,
-      );
+    // NEW — the missing "S" step: send extracted text to Ollama, get modules back
+    const generated = await this.llmService.generateModules(
+      processedSource.extractedText,
+      courseRequest.courseTitle,
+      courseRequest.targetAudience,
+    );
+
+    const course = await this.createCourse(
+      courseRequest,
+      processedSource,
+      generated.modules,
+      generated.learningObjectives,
+    );
 
     return this.buildCreateCourseResponse(course);
   }
@@ -84,13 +99,11 @@ export class CoursesService {
             break;
 
           case 'targetAudience':
-            targetAudience =
-              String(part.value) as TargetAudience;
+            targetAudience = String(part.value) as TargetAudience;
             break;
 
           case 'sourceType':
-            sourceType =
-              String(part.value) as SourceType;
+            sourceType = String(part.value) as SourceType;
             break;
 
           case 'content':
@@ -129,50 +142,33 @@ export class CoursesService {
   // VALIDATION
   // ============================================================
 
-  private validateCourseRequest(
-    request: ParsedCourseRequest,
-  ): void {
-    const {
-      sourceType,
-      content,
-      file,
-    } = request;
+  private validateCourseRequest(request: ParsedCourseRequest): void {
+    const { sourceType, content, file } = request;
 
     if (sourceType === SourceType.TEXT) {
       this.validateTextSource(content);
       return;
     }
 
-    if (
-      sourceType === SourceType.PDF ||
-      sourceType === SourceType.AUDIO
-    ) {
+    if (sourceType === SourceType.PDF || sourceType === SourceType.AUDIO) {
       this.validateFileSource(file);
       return;
     }
 
     throw new BadRequestException(
-      `Unsupported source type: ${sourceType}`,
+      `Unsupported source type: ${String(sourceType)}`,
     );
   }
 
-  private validateTextSource(
-    content?: string,
-  ): void {
+  private validateTextSource(content?: string): void {
     if (!content?.trim()) {
-      throw new BadRequestException(
-        'Content is required for TEXT source',
-      );
+      throw new BadRequestException('Content is required for TEXT source');
     }
   }
 
-  private validateFileSource(
-    file?: ParsedCourseRequest['file'],
-  ): void {
+  private validateFileSource(file?: ParsedCourseRequest['file']): void {
     if (!file) {
-      throw new BadRequestException(
-        'File is required for this source type',
-      );
+      throw new BadRequestException('File is required for this source type');
     }
   }
 
@@ -194,9 +190,7 @@ export class CoursesService {
         return this.processAudioSource(request);
 
       default:
-        throw new BadRequestException(
-          'Unsupported source type',
-        );
+        throw new BadRequestException('Unsupported source type');
     }
   }
 
@@ -204,9 +198,7 @@ export class CoursesService {
   // TEXT
   // ============================================================
 
-  private processTextSource(
-    request: ParsedCourseRequest,
-  ): ProcessedSource {
+  private processTextSource(request: ParsedCourseRequest): ProcessedSource {
     return {
       type: SourceType.TEXT,
       extractedText: request.content!.trim(),
@@ -224,11 +216,9 @@ export class CoursesService {
 
     this.validatePdfFile(file);
 
-    const filePath =
-      await this.saveUploadedFile(file);
+    const filePath = await this.saveUploadedFile(file);
 
-    const extractedText =
-      await this.parsePdf(filePath);
+    const extractedText = await this.parsePdf(filePath);
 
     return {
       type: SourceType.PDF,
@@ -242,9 +232,7 @@ export class CoursesService {
     file: NonNullable<ParsedCourseRequest['file']>,
   ): void {
     if (file.mimeType !== 'application/pdf') {
-      throw new BadRequestException(
-        'Only PDF files are supported',
-      );
+      throw new BadRequestException('Only PDF files are supported');
     }
   }
 
@@ -259,15 +247,12 @@ export class CoursesService {
 
     this.validateAudioFile(file);
 
-    const filePath =
-      await this.saveUploadedFile(file);
+    const filePath = await this.saveUploadedFile(file);
 
-    const extractedText =await this.openAIService.transcribeAudio(filePath,);
+    const extractedText = await this.openAIService.transcribeAudio(filePath);
 
     if (!extractedText) {
-      throw new BadRequestException(
-        'No readable speech found in audio',
-      );
+      throw new BadRequestException('No readable speech found in audio');
     }
 
     return {
@@ -289,9 +274,7 @@ export class CoursesService {
     ];
 
     if (!allowedAudioTypes.includes(file.mimeType)) {
-      throw new BadRequestException(
-        'Unsupported audio format',
-      );
+      throw new BadRequestException('Unsupported audio format');
     }
   }
 
@@ -302,41 +285,25 @@ export class CoursesService {
   private async saveUploadedFile(
     file: NonNullable<ParsedCourseRequest['file']>,
   ): Promise<string> {
-    const uploadDirectory =
-      join(process.cwd(), 'uploads');
+    const uploadDirectory = join(process.cwd(), 'uploads');
 
     await mkdir(uploadDirectory, {
       recursive: true,
     });
 
-    const uniqueFileName =
-      this.createUniqueFileName(
-        file.fileName,
-      );
+    const uniqueFileName = this.createUniqueFileName(file.fileName);
 
-    const filePath =
-      join(
-        uploadDirectory,
-        uniqueFileName,
-      );
+    const filePath = join(uploadDirectory, uniqueFileName);
 
-    await writeFile(
-      filePath,
-      file.buffer,
-    );
+    await writeFile(filePath, file.buffer);
 
     return filePath;
   }
 
-  private createUniqueFileName(
-    originalFileName: string,
-  ): string {
+  private createUniqueFileName(originalFileName: string): string {
     const timestamp = Date.now();
 
-    const randomPart =
-      Math.random()
-        .toString(36)
-        .substring(2, 8);
+    const randomPart = Math.random().toString(36).substring(2, 8);
 
     return `${timestamp}-${randomPart}-${originalFileName}`;
   }
@@ -345,20 +312,16 @@ export class CoursesService {
   // PDF PARSING
   // ============================================================
 
-  private async parsePdf(
-    filePath: string,
-  ): Promise<string> {
+  private async parsePdf(filePath: string): Promise<string> {
+    const buffer = await readFile(filePath);
 
-    const buffer =
-      await readFile(filePath);
-
-    const result =
-      await pdfParse(buffer);
+    const parsePdfContent = pdfParse as (
+      buffer: Buffer,
+    ) => Promise<{ text?: string }>;
+    const result = await parsePdfContent(buffer);
 
     if (!result.text?.trim()) {
-      throw new BadRequestException(
-        'No readable text found in PDF',
-      );
+      throw new BadRequestException('No readable text found in PDF');
     }
 
     return result.text.trim();
@@ -371,25 +334,39 @@ export class CoursesService {
   private async createCourse(
     request: ParsedCourseRequest,
     source: ProcessedSource,
+    generatedModules: {
+      order: number;
+      title: string;
+      summary: string;
+      examples: string[];
+      knowledgeChecks: { question: string; answer: string }[];
+    }[],
+    learningObjectives: string[],
   ): Promise<CourseDocument> {
     return this.courseModel.create({
       courseTitle: request.courseTitle,
 
-      targetAudience:
-        request.targetAudience,
+      targetAudience: request.targetAudience,
 
-      status:
-        CourseStatus.PROCESSING,
+      status: CourseStatus.READY_FOR_REVIEW,
+
+      learningObjectives,
 
       source: {
         type: source.type,
         fileName: source.fileName,
         filePath: source.filePath,
-        extractedText:
-          source.extractedText,
+        extractedText: source.extractedText,
       },
 
-      modules: [],
+      modules: generatedModules.map((module, index) => ({
+        order: module.order ?? index + 1,
+        title: module.title,
+        summary: module.summary,
+        examples: module.examples ?? [],
+        knowledgeChecks: module.knowledgeChecks ?? [],
+        status: ModuleStatus.REVIEW,
+      })),
     });
   }
 
@@ -397,41 +374,30 @@ export class CoursesService {
   // RESPONSE
   // ============================================================
 
-  private buildCreateCourseResponse(
-    course: CourseDocument,
-  ) {
+  private buildCreateCourseResponse(course: CourseDocument) {
     return {
       success: true,
 
-      message:
-        'Course source processed successfully',
+      message: 'Course source processed successfully',
 
       courseId: course._id,
 
-      courseTitle:
-        course.courseTitle,
+      courseTitle: course.courseTitle,
 
-      status:
-        course.status,
+      status: course.status,
 
-      sourceType:
-        course.source.type,
+      sourceType: course.source.type,
 
-      fileName:
-        course.source.fileName,
+      fileName: course.source.fileName,
 
-      extractedTextLength:
-        course.source.extractedText?.length ?? 0,
+      extractedTextLength: course.source.extractedText?.length ?? 0,
     };
   }
 
-  private async validateCourseTitle(
-    courseTitle: string,
-  ): Promise<void> {
-    const existingCourse =
-      await this.courseModel.exists({
-        courseTitle,
-      });
+  private async validateCourseTitle(courseTitle: string): Promise<void> {
+    const existingCourse = await this.courseModel.exists({
+      courseTitle,
+    });
 
     if (existingCourse) {
       throw new BadRequestException(
@@ -440,21 +406,26 @@ export class CoursesService {
     }
   }
 
-  async findById(id: string) {
-    const course = await this.courseModel.findById(id, {source: 0}).exec();
+  async findById(id: string): Promise<CourseDocument> {
+    const course = await this.courseModel.findById(id, { source: 0 }).exec();
     if (!course) {
       throw new NotFoundException('Course not found');
     }
     return course;
   }
 
-  async findAll() {
-    const courses = await this.courseModel.find({}, {source: 0}).exec();
+  async findAll(): Promise<CourseDocument[]> {
+    const courses = await this.courseModel.find({}, { source: 0 }).exec();
     return courses;
   }
 
-  async update(courseId: string, dto: UpdateCourseDto) {
-    const course = await this.courseModel.findById(courseId, {source: 0}).exec();
+  async update(
+    courseId: string,
+    dto: UpdateCourseDto,
+  ): Promise<{ success: boolean; message: string; course: CourseDocument }> {
+    const course = await this.courseModel
+      .findById(courseId, { source: 0 })
+      .exec();
 
     if (!course) {
       throw new NotFoundException('Course not found');
@@ -470,7 +441,9 @@ export class CoursesService {
         });
 
         if (duplicate) {
-          throw new BadRequestException(`Course with title "${NewTitle}" already exists`);
+          throw new BadRequestException(
+            `Course with title "${NewTitle}" already exists`,
+          );
         }
       }
 
@@ -489,31 +462,41 @@ export class CoursesService {
         message: 'Course updated successfully',
         course,
       };
-    } catch (error: any) {
-      if (error?.code === 11000) {
-        throw new BadRequestException('A course with this title already exists');
+    } catch (error: unknown) {
+      const mongoError = error as { code?: number };
+      if (mongoError.code === 11000) {
+        throw new BadRequestException(
+          'A course with this title already exists',
+        );
       }
 
       throw error;
     }
   }
 
-  async approveCourse(courseId: string) {
-    const course = await this.courseModel.findById(courseId, {source: 0}).exec();
+  async approveCourse(
+    courseId: string,
+  ): Promise<{ success: boolean; message: string; course: CourseDocument }> {
+    const course = await this.courseModel
+      .findById(courseId, { source: 0 })
+      .exec();
 
     if (!course) {
-      throw new NotFoundException('Course not found',);
+      throw new NotFoundException('Course not found');
     }
 
     if (!course.modules.length) {
-      throw new BadRequestException('Course has no modules',);
+      throw new BadRequestException('Course has no modules');
     }
 
-    const hasUnapprovedModule =
-      course.modules.some((module) =>module.status !== ModuleStatus.APPROVED,);
+    const hasUnapprovedModule = course.modules.some(
+      (module) => module.status !== ModuleStatus.APPROVED,
+    );
 
     if (hasUnapprovedModule) {
-      throw new BadRequestException('All modules must be approved before publishing the course');
+      throw new BadRequestException(
+        'All modules must be approved before publishing the course',
+      );
     }
 
     course.status = CourseStatus.APPROVED;

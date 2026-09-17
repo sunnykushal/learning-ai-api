@@ -39,7 +39,7 @@ export class Source {
 @Schema()
 export class Module {
   _id: Types.ObjectId;
-  
+
   @Prop({ required: true })
   order: number;
 

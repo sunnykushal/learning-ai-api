@@ -12,10 +12,12 @@ import { AiModule } from './ai/ai.module';
     ConfigModule.forRoot({
       isGlobal: true,
     }),
-    MongooseModule.forRoot(process.env.MONGO_URI || 'mongodb://localhost:27017/learning-ai'),
+    MongooseModule.forRoot(
+      process.env.MONGO_URI || 'mongodb://localhost:27017/learning-ai',
+    ),
     CoursesModule,
     ModulesModule,
-    AiModule
+    AiModule,
   ],
   controllers: [AppController],
   providers: [AppService],
