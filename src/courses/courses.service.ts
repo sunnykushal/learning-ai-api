@@ -339,7 +339,11 @@ export class CoursesService {
       title: string;
       summary: string;
       examples: string[];
-      knowledgeChecks: { question: string; answer: string }[];
+      knowledgeChecks: {
+        question: string;
+        options?: string[];
+        answer: string;
+      }[];
     }[],
     learningObjectives: string[],
   ): Promise<CourseDocument> {

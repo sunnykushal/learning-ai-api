@@ -5,7 +5,7 @@ interface GeneratedModule {
   title: string;
   summary: string;
   examples: string[];
-  knowledgeChecks: { question: string; answer: string }[];
+  knowledgeChecks: KnowledgeCheck[];
 }
 
 interface GeneratedCourseContent {
@@ -13,10 +13,17 @@ interface GeneratedCourseContent {
   modules: GeneratedModule[];
 }
 
+interface KnowledgeCheck {
+  question: string;
+  options: string[];
+  answer: string;
+}
+
 // Above this length, we split the text into chunks instead of sending it all
 // in one prompt. Below it, the old single-call path runs unchanged.
 const CHUNK_THRESHOLD_CHARS = 7000;
 const CHUNK_SIZE_CHARS = 7000;
+const OLLAMA_TIMEOUT_MS = 600_000;
 
 @Injectable()
 export class LlmService {
@@ -137,7 +144,7 @@ Return ONLY a JSON object in exactly this shape, with no extra text, no markdown
     {
       "order": 1,
       "title": "string",
-      "summary": "2-3 sentence summary",
+      "summary": "1-2 sentence summary",
       "examples": ["concrete example 1", "concrete example 2"],
       "knowledgeChecks": [
         { "question": "string", "answer": "string" }
@@ -146,7 +153,7 @@ Return ONLY a JSON object in exactly this shape, with no extra text, no markdown
   ]
 }
 
-Create 4 to 6 course-wide learningObjectives, and 3 to 5 modules depending on how much distinct content is in the source.`;
+Create exactly 3 course-wide learningObjectives, exactly 2 concise modules, and exactly 1 knowledgeChecks item per module.`;
 
     const raw = await this.callOllama(prompt);
     return this.parseFullResponse(raw);
@@ -169,21 +176,23 @@ Target audience: ${targetAudience}
 Section text:
 """${chunkText}"""
 
-Turn ONLY this section into 1 to 3 course modules covering just this section's content.
+Turn ONLY this section into 1 concise course module covering just this section's content.
 Return ONLY a JSON object in exactly this shape, with no extra text, no markdown fences:
 {
   "modules": [
     {
       "order": 1,
       "title": "string",
-      "summary": "2-3 sentence summary",
+      "summary": "1-2 sentence summary",
       "examples": ["concrete example 1", "concrete example 2"],
       "knowledgeChecks": [
         { "question": "string", "answer": "string" }
       ]
     }
   ]
-}`;
+}
+
+Create exactly 1 knowledgeChecks item per module.`;
 
     const raw = await this.callOllama(prompt);
     return this.parseModulesOnly(raw);
@@ -211,7 +220,7 @@ Source material:
 Return ONLY a JSON object in exactly this shape, with no extra text, no markdown fences:
 {
   "title": "string",
-  "summary": "2-3 sentence summary",
+  "summary": "1-2 sentence summary",
   "examples": ["concrete example 1", "concrete example 2"],
   "knowledgeChecks": [
     { "question": "string", "answer": "string" }
@@ -262,6 +271,7 @@ Write 4 to 6 objectives that describe what a learner will be able to do after th
     try {
       response = await fetch(`${this.baseUrl}/api/generate`, {
         method: 'POST',
+        signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: this.model,
@@ -271,10 +281,17 @@ Write 4 to 6 objectives that describe what a learner will be able to do after th
           options: {
             temperature: 0.3,
             num_ctx: 8192, // raise from Ollama's small default so a full chunk actually fits
+            num_predict: 900,
           },
         }),
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'TimeoutError') {
+        throw new InternalServerErrorException(
+          `Ollama did not finish within ${OLLAMA_TIMEOUT_MS / 1000} seconds. Try a shorter source, or retry after the current local model request finishes.`,
+        );
+      }
+
       throw new InternalServerErrorException(
         `Could not reach Ollama at ${this.baseUrl}. Is 'ollama serve' running?`,
       );
@@ -333,7 +350,7 @@ Write 4 to 6 objectives that describe what a learner will be able to do after th
       learningObjectives: Array.isArray(parsed.learningObjectives)
         ? parsed.learningObjectives
         : [],
-      modules: parsed.modules,
+      modules: this.normalizeModules(parsed.modules),
     };
   }
 
@@ -349,7 +366,9 @@ Write 4 to 6 objectives that describe what a learner will be able to do after th
       );
     }
 
-    return Array.isArray(parsed.modules) ? parsed.modules : [];
+    return Array.isArray(parsed.modules)
+      ? this.normalizeModules(parsed.modules)
+      : [];
   }
 
   private parseSingleModule(rawText: string): Omit<GeneratedModule, 'order'> {
@@ -374,9 +393,99 @@ Write 4 to 6 objectives that describe what a learner will be able to do after th
       title: parsed.title,
       summary: parsed.summary,
       examples: Array.isArray(parsed.examples) ? parsed.examples : [],
-      knowledgeChecks: Array.isArray(parsed.knowledgeChecks)
-        ? parsed.knowledgeChecks
-        : [],
+      knowledgeChecks: this.normalizeKnowledgeChecks(
+        parsed.knowledgeChecks,
+        this.getAnswerPool(parsed.knowledgeChecks),
+      ),
     };
+  }
+
+  private normalizeModules(modules: GeneratedModule[]): GeneratedModule[] {
+    const answerPool = modules.flatMap((module) =>
+      this.getAnswerPool(module.knowledgeChecks),
+    );
+
+    return modules.map((module, index) =>
+      this.normalizeModule(module, index, answerPool),
+    );
+  }
+
+  private normalizeModule(
+    module: Partial<GeneratedModule>,
+    index: number,
+    answerPool: string[],
+  ): GeneratedModule {
+    return {
+      order: module.order ?? index + 1,
+      title: module.title || `Module ${index + 1}`,
+      summary: module.summary || '',
+      examples: Array.isArray(module.examples) ? module.examples : [],
+      knowledgeChecks: this.normalizeKnowledgeChecks(
+        module.knowledgeChecks,
+        answerPool,
+      ),
+    };
+  }
+
+  private normalizeKnowledgeChecks(
+    value: unknown,
+    answerPool: string[] = [],
+  ): KnowledgeCheck[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return null;
+        }
+
+        const candidate = item as Partial<KnowledgeCheck>;
+        const question = this.cleanText(candidate.question);
+        const answer = this.cleanText(candidate.answer);
+        const options = Array.isArray(candidate.options)
+          ? candidate.options.map((option) => this.cleanText(option))
+          : [];
+        const fallbackOptions = answerPool.filter(
+          (option) => option !== answer,
+        );
+        const uniqueOptions = [
+          ...new Set([answer, ...options, ...fallbackOptions].filter(Boolean)),
+        ];
+
+        if (!question || !answer) {
+          return null;
+        }
+
+        return {
+          question,
+          options: uniqueOptions.slice(0, 4),
+          answer,
+        };
+      })
+      .filter((item): item is KnowledgeCheck => item !== null);
+  }
+
+  private getAnswerPool(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return [
+      ...new Set(
+        value
+          .map((item) =>
+            item && typeof item === 'object'
+              ? this.cleanText((item as Partial<KnowledgeCheck>).answer)
+              : '',
+          )
+          .filter(Boolean),
+      ),
+    ];
+  }
+
+  private cleanText(value: unknown): string {
+    return typeof value === 'string' ? value.trim() : '';
   }
 }
