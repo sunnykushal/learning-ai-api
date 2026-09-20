@@ -250,6 +250,7 @@ export class CoursesService {
     const filePath = await this.saveUploadedFile(file);
 
     const extractedText = await this.openAIService.transcribeAudio(filePath);
+    console.log(extractedText);
 
     if (!extractedText) {
       throw new BadRequestException('No readable speech found in audio');
