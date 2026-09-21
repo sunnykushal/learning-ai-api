@@ -1,30 +1,26 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
-
-import OpenAI from 'openai';
-import { createReadStream } from 'fs';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { WhisperService } from './whisper.service';
 
 @Injectable()
 export class AiService {
-  private readonly openai: OpenAI;
+  constructor(
+    private readonly whisperService: WhisperService,
+  ) {}
 
-  constructor() {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-  }
+  async transcribeAudio(
+    filePath: string,
+  ): Promise<string> {
+    const text =
+      await this.whisperService.transcribe(
+        filePath,
+      );
 
-  async transcribeAudio(filePath: string): Promise<string> {
-    try {
-      const transcription = await this.openai.audio.transcriptions.create({
-        file: createReadStream(filePath),
-        model: 'whisper-1',
-      });
-
-      return transcription.text.trim();
-    } catch (error) {
-      console.error('Audio transcription failed:', error);
-
-      throw new InternalServerErrorException('Failed to transcribe audio');
+    if (!text) {
+      throw new BadRequestException(
+        'No readable speech found in audio',
+      );
     }
+
+    return text;
   }
 }

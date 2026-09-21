@@ -20,7 +20,11 @@ async function bootstrap() {
     credentials: true,
   });
 
-  await app.register(FastifyMultipart);
+  await app.register(FastifyMultipart, {
+    limits: {
+      fileSize: 20 * 1024 * 1024, // 20 MB
+    },
+  });
 
   // ✅ FIX #2: Register the pipe BEFORE listen(), not after
   app.useGlobalPipes(
