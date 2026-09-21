@@ -19,11 +19,32 @@ interface KnowledgeCheck {
   answer: string;
 }
 
-// Above this length, we split the text into chunks instead of sending it all
-// in one prompt. Below it, the old single-call path runs unchanged.
-const CHUNK_THRESHOLD_CHARS = 7000;
-const CHUNK_SIZE_CHARS = 7000;
-const OLLAMA_TIMEOUT_MS = 600_000;
+const CHUNK_THRESHOLD_CHARS = 5500;
+const CHUNK_SIZE_CHARS = 5500;
+const OLLAMA_TIMEOUT_MS = 900_000;
+const OLLAMA_NUM_PREDICT = 2500;
+
+// Baseline tone applied regardless of audience level — depth and precision
+// are never sacrificed, only how much prior knowledge is assumed changes.
+const PROFESSIONAL_TONE_INSTRUCTION = `Write for a working professional who is genuinely learning this subject, not a child. Use accurate, correct domain terminology rather than avoiding it. Prioritize real depth over brevity: explain not just WHAT a concept is, but WHY it matters and HOW it is actually applied in practice. Avoid vague, generic filler sentences — every sentence should teach something specific and concrete. Do not write a thin, superficial summary.`;
+
+// NEW — this is the piece that was missing. targetAudience was previously
+// passed into the prompt as a bare label with no instruction attached to
+// it, so the model had nothing to actually act on. This maps each level to
+// a concrete instruction about assumed background and depth.
+function getAudienceInstruction(targetAudience: string): string {
+  const normalized = (targetAudience || '').toUpperCase();
+
+  switch (normalized) {
+    case 'BEGINNER':
+      return `AUDIENCE LEVEL: Beginner. Assume the learner has NO prior background in this subject. Define every foundational term clearly the first time it appears — do not assume familiarity with related tools, jargon, or concepts outside what's explicitly in the source material. Build ideas up from first principles before introducing any advanced implications. Prefer simpler sentence structure over dense, jargon-heavy phrasing, while still using correct terminology.`;
+    case 'ADVANCED':
+      return `AUDIENCE LEVEL: Advanced. Assume the learner already has strong, working foundational knowledge in this domain — do NOT define basic terms or re-explain fundamentals. Focus on nuance, trade-offs, edge cases, and practical implications an experienced practitioner would actually care about. It's acceptable, even expected, to reference adjacent concepts and tools without stopping to define them.`;
+    case 'INTERMEDIATE':
+    default:
+      return `AUDIENCE LEVEL: Intermediate. Assume the learner has general familiarity with this broader subject area, but not necessarily with these specific concepts. Skip defining very basic foundational terms, but clearly explain how each concept connects to or builds on typical prior knowledge in this field.`;
+  }
+}
 
 @Injectable()
 export class LlmService {
@@ -39,7 +60,6 @@ export class LlmService {
     const trimmedInput = extractedText.trim();
 
     if (trimmedInput.length <= CHUNK_THRESHOLD_CHARS) {
-      // Short source — one call, same as before.
       return this.generateFromSingleChunk(
         trimmedInput,
         courseTitle,
@@ -47,14 +67,9 @@ export class LlmService {
       );
     }
 
-    // ---------- SPLIT ----------
     const chunks = this.splitIntoChunks(trimmedInput, CHUNK_SIZE_CHARS);
 
-    // ---------- GENERATE ----------
-    // Learning objectives are course-wide, not per-chunk — generate them once
-    // from the first chunk (the intro/overview is almost always near the start
-    // of a document) rather than repeating similar objectives per chunk.
-    const objectivesPromise = this.generateObjectives(
+    const learningObjectives = await this.generateObjectives(
       chunks[0],
       courseTitle,
       targetAudience,
@@ -62,8 +77,6 @@ export class LlmService {
 
     const modulesPerChunk: GeneratedModule[][] = [];
     for (let i = 0; i < chunks.length; i++) {
-      // Sequential, not Promise.all — a single local Ollama instance processes
-      // one request at a time anyway, and this keeps memory/log output sane.
       const chunkModules = await this.generateModulesForChunk(
         chunks[i],
         courseTitle,
@@ -74,9 +87,6 @@ export class LlmService {
       modulesPerChunk.push(chunkModules);
     }
 
-    const learningObjectives = await objectivesPromise;
-
-    // ---------- MERGE ----------
     const mergedModules = modulesPerChunk
       .flat()
       .map((module, index) => ({ ...module, order: index + 1 }));
@@ -95,8 +105,6 @@ export class LlmService {
   // ============================================================
 
   private splitIntoChunks(text: string, maxChars: number): string[] {
-    // Split on blank lines (paragraph boundaries) so we don't cut a sentence
-    // in half mid-chunk — that produces noticeably worse LLM output.
     const paragraphs = text.split(/\n\s*\n/);
     const chunks: string[] = [];
     let current = '';
@@ -113,8 +121,6 @@ export class LlmService {
       chunks.push(current.trim());
     }
 
-    // Edge case: a single paragraph longer than maxChars with no blank lines
-    // at all (e.g. one giant block of text). Hard-slice it as a last resort.
     return chunks.flatMap((chunk) =>
       chunk.length > maxChars * 1.5
         ? [chunk.slice(0, maxChars), chunk.slice(maxChars)]
@@ -123,7 +129,7 @@ export class LlmService {
   }
 
   // ============================================================
-  // GENERATE — single-call path (short source, unchanged behavior)
+  // GENERATE — single-call path
   // ============================================================
 
   private async generateFromSingleChunk(
@@ -131,29 +137,33 @@ export class LlmService {
     courseTitle: string,
     targetAudience: string,
   ): Promise<GeneratedCourseContent> {
-    const prompt = `You are an instructional designer. Turn this source material into a training course.
+    const prompt = `You are a senior instructional designer building professional training content, similar in depth to enterprise product documentation.
 Course title: ${courseTitle}
 Target audience: ${targetAudience}
 Source material:
 """${text}"""
 
+${PROFESSIONAL_TONE_INSTRUCTION}
+
+${getAudienceInstruction(targetAudience)}
+
 Return ONLY a JSON object in exactly this shape, with no extra text, no markdown fences:
 {
-  "learningObjectives": ["string", "string", "string"],
+  "learningObjectives": ["string", "string", "string", "string"],
   "modules": [
     {
       "order": 1,
       "title": "string",
-      "summary": "1-2 sentence summary",
-      "examples": ["concrete example 1", "concrete example 2"],
+      "summary": "A thorough 4 to 6 sentence explanation of the concept, calibrated to the audience level above — not a one-line summary.",
+      "examples": ["a concrete, realistic example grounded in actual professional use", "a second distinct concrete example"],
       "knowledgeChecks": [
-        { "question": "string", "answer": "string" }
+        { "question": "string", "options": ["string", "string", "string", "string"], "answer": "string, must exactly match one of the options" }
       ]
     }
   ]
 }
 
-Create exactly 3 course-wide learningObjectives, exactly 2 concise modules, and exactly 1 knowledgeChecks item per module.`;
+Create exactly 4 to 6 course-wide learningObjectives, exactly 3 modules covering genuinely distinct sub-topics from the source material, 2 to 3 concrete examples per module, and exactly 2 knowledgeChecks per module, each with 4 answer options.`;
 
     const raw = await this.callOllama(prompt);
     return this.parseFullResponse(raw);
@@ -170,29 +180,33 @@ Create exactly 3 course-wide learningObjectives, exactly 2 concise modules, and 
     chunkIndex: number,
     totalChunks: number,
   ): Promise<GeneratedModule[]> {
-    const prompt = `You are an instructional designer. This is section ${chunkIndex} of ${totalChunks} of a larger source document for a course.
+    const prompt = `You are a senior instructional designer building professional training content, similar in depth to enterprise product documentation. This is section ${chunkIndex} of ${totalChunks} of a larger source document for a course.
 Course title: ${courseTitle}
 Target audience: ${targetAudience}
 Section text:
 """${chunkText}"""
 
-Turn ONLY this section into 1 concise course module covering just this section's content.
+${PROFESSIONAL_TONE_INSTRUCTION}
+
+${getAudienceInstruction(targetAudience)}
+
+Turn ONLY this section into 1 course module covering just this section's content, in real depth, calibrated to the audience level above.
 Return ONLY a JSON object in exactly this shape, with no extra text, no markdown fences:
 {
   "modules": [
     {
       "order": 1,
       "title": "string",
-      "summary": "1-2 sentence summary",
-      "examples": ["concrete example 1", "concrete example 2"],
+      "summary": "A thorough 4 to 6 sentence explanation of the concept, calibrated to the audience level above.",
+      "examples": ["a concrete, realistic example grounded in actual professional use", "a second distinct concrete example"],
       "knowledgeChecks": [
-        { "question": "string", "answer": "string" }
+        { "question": "string", "options": ["string", "string", "string", "string"], "answer": "string, must exactly match one of the options" }
       ]
     }
   ]
 }
 
-Create exactly 1 knowledgeChecks item per module.`;
+Provide 2 to 3 concrete examples and exactly 2 knowledgeChecks for this module, each with 4 answer options.`;
 
     const raw = await this.callOllama(prompt);
     return this.parseModulesOnly(raw);
@@ -210,22 +224,28 @@ Create exactly 1 knowledgeChecks item per module.`;
   ): Promise<Omit<GeneratedModule, 'order'>> {
     const trimmedInput = sourceText.trim().slice(0, CHUNK_THRESHOLD_CHARS);
 
-    const prompt = `You are an instructional designer. Re-research and rewrite ONE module of an existing training course using the source material below. Produce fresh content — do not just repeat the module's current wording.
+    const prompt = `You are a senior instructional designer. Re-research and rewrite ONE module of an existing training course using the source material below. Produce fresh, deeper content — do not just repeat the module's current wording.
 Course title: ${courseTitle}
 Target audience: ${targetAudience}
 Module topic to cover: "${currentModuleTitle}"
 Source material:
 """${trimmedInput}"""
 
+${PROFESSIONAL_TONE_INSTRUCTION}
+
+${getAudienceInstruction(targetAudience)}
+
 Return ONLY a JSON object in exactly this shape, with no extra text, no markdown fences:
 {
   "title": "string",
-  "summary": "1-2 sentence summary",
-  "examples": ["concrete example 1", "concrete example 2"],
+  "summary": "A thorough 4 to 6 sentence explanation, calibrated to the audience level above.",
+  "examples": ["a concrete, realistic example", "a second distinct concrete example"],
   "knowledgeChecks": [
-    { "question": "string", "answer": "string" }
+    { "question": "string", "options": ["string", "string", "string", "string"], "answer": "string, must exactly match one of the options" }
   ]
-}`;
+}
+
+Provide 2 to 3 examples and exactly 2 knowledgeChecks, each with 4 answer options.`;
 
     const raw = await this.callOllama(prompt);
     return this.parseSingleModule(raw);
@@ -236,16 +256,18 @@ Return ONLY a JSON object in exactly this shape, with no extra text, no markdown
     courseTitle: string,
     targetAudience: string,
   ): Promise<string[]> {
-    const prompt = `You are an instructional designer. Based on this opening section of a larger source document, write course-wide learning objectives.
+    const prompt = `You are a senior instructional designer. Based on this opening section of a larger source document, write course-wide learning objectives.
 Course title: ${courseTitle}
 Target audience: ${targetAudience}
 Opening section:
 """${firstChunk}"""
 
+${getAudienceInstruction(targetAudience)}
+
 Return ONLY a JSON object in exactly this shape, with no extra text, no markdown fences:
 { "learningObjectives": ["string", "string", "string", "string"] }
 
-Write 4 to 6 objectives that describe what a learner will be able to do after the FULL course, not just this section.`;
+Write 4 to 6 specific, concrete objectives describing what a learner will actually be able to DO after the FULL course, calibrated to the audience level above — avoid vague phrasing like "understand the basics of X"; prefer specific, actionable outcomes.`;
 
     const raw = await this.callOllama(prompt);
 
@@ -256,8 +278,6 @@ Write 4 to 6 objectives that describe what a learner will be able to do after th
         ? parsed.learningObjectives
         : [];
     } catch {
-      // Objectives are non-critical to the course being usable — don't fail
-      // the whole generation over this one call.
       return [];
     }
   }
@@ -278,10 +298,11 @@ Write 4 to 6 objectives that describe what a learner will be able to do after th
           prompt,
           stream: false,
           format: 'json',
+          keep_alive: '30m',
           options: {
             temperature: 0.3,
-            num_ctx: 8192, // raise from Ollama's small default so a full chunk actually fits
-            num_predict: 900,
+            num_ctx: 8192,
+            num_predict: OLLAMA_NUM_PREDICT,
           },
         }),
       });
