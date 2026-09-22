@@ -22,7 +22,7 @@ interface KnowledgeCheck {
 const CHUNK_THRESHOLD_CHARS = 5500;
 const CHUNK_SIZE_CHARS = 5500;
 const OLLAMA_TIMEOUT_MS = 900_000;
-const OLLAMA_NUM_PREDICT = 2500;
+const OLLAMA_NUM_PREDICT = 1200;
 
 // Baseline tone applied regardless of audience level — depth and precision
 // are never sacrificed, only how much prior knowledge is assumed changes.
@@ -129,17 +129,74 @@ export class LlmService {
   }
 
   // ============================================================
-  // GENERATE — single-call path
+  // GENERATE — single-source path
   // ============================================================
-
+  //
+  // For smaller source documents, do not ask Ollama to generate the
+  // entire course in one response. Generate objectives once, then
+  // generate each module independently. This keeps every Ollama
+  // response small enough for local inference.
   private async generateFromSingleChunk(
     text: string,
     courseTitle: string,
     targetAudience: string,
   ): Promise<GeneratedCourseContent> {
+    const learningObjectives = await this.generateObjectives(
+      text,
+      courseTitle,
+      targetAudience,
+    );
+
+    const modules: GeneratedModule[] = [];
+    const moduleCount = 3;
+
+    for (let i = 0; i < moduleCount; i++) {
+      const previousModuleTitles = modules
+        .map((module) => module.title)
+        .filter(Boolean);
+
+      const module = await this.generateModuleFromFullSource(
+        text,
+        courseTitle,
+        targetAudience,
+        i + 1,
+        moduleCount,
+        previousModuleTitles,
+      );
+
+      modules.push(module);
+    }
+
+    return {
+      learningObjectives,
+      modules,
+    };
+  }
+
+  private async generateModuleFromFullSource(
+    text: string,
+    courseTitle: string,
+    targetAudience: string,
+    moduleIndex: number,
+    totalModules: number,
+    previousModuleTitles: string[],
+  ): Promise<GeneratedModule> {
+    const previousTopicsInstruction =
+      previousModuleTitles.length > 0
+        ? `Previously generated module titles:
+${previousModuleTitles.map((title) => `- ${title}`).join('\n')}
+
+Select a genuinely different sub-topic from the source material. Do not repeat the
+same concept, example, or explanation covered by those modules.`
+        : `This is the first module. Select the most important foundational or
+primary sub-topic from the source material.`;
+
     const prompt = `You are a senior instructional designer building professional training content, similar in depth to enterprise product documentation.
+
 Course title: ${courseTitle}
 Target audience: ${targetAudience}
+Module ${moduleIndex} of ${totalModules}
+
 Source material:
 """${text}"""
 
@@ -147,26 +204,43 @@ ${PROFESSIONAL_TONE_INSTRUCTION}
 
 ${getAudienceInstruction(targetAudience)}
 
+${previousTopicsInstruction}
+
+Create ONLY this one module. Cover one coherent, genuinely useful sub-topic from the
+source material and keep it distinct from other modules.
+
 Return ONLY a JSON object in exactly this shape, with no extra text, no markdown fences:
 {
-  "learningObjectives": ["string", "string", "string", "string"],
-  "modules": [
+  "order": ${moduleIndex},
+  "title": "string",
+  "summary": "A thorough 4 to 6 sentence explanation of the concept, calibrated to the audience level above — not a one-line summary.",
+  "examples": [
+    "a concrete, realistic example grounded in actual professional use",
+    "a second distinct concrete example"
+  ],
+  "knowledgeChecks": [
     {
-      "order": 1,
-      "title": "string",
-      "summary": "A thorough 4 to 6 sentence explanation of the concept, calibrated to the audience level above — not a one-line summary.",
-      "examples": ["a concrete, realistic example grounded in actual professional use", "a second distinct concrete example"],
-      "knowledgeChecks": [
-        { "question": "string", "options": ["string", "string", "string", "string"], "answer": "string, must exactly match one of the options" }
-      ]
+      "question": "string",
+      "options": ["string", "string", "string", "string"],
+      "answer": "string, must exactly match one of the options"
+    },
+    {
+      "question": "string",
+      "options": ["string", "string", "string", "string"],
+      "answer": "string, must exactly match one of the options"
     }
   ]
 }
 
-Create exactly 4 to 6 course-wide learningObjectives, exactly 3 modules covering genuinely distinct sub-topics from the source material, 2 to 3 concrete examples per module, and exactly 2 knowledgeChecks per module, each with 4 answer options.`;
+Provide 2 to 3 concrete examples and exactly 2 knowledgeChecks, each with 4 answer options.`;
 
     const raw = await this.callOllama(prompt);
-    return this.parseFullResponse(raw);
+    const parsed = this.parseSingleModule(raw);
+
+    return {
+      ...parsed,
+      order: moduleIndex,
+    };
   }
 
   // ============================================================
@@ -288,50 +362,221 @@ Write 4 to 6 specific, concrete objectives describing what a learner will actual
 
   private async callOllama(prompt: string): Promise<string> {
     let response: Response;
+
     try {
       response = await fetch(`${this.baseUrl}/api/generate`, {
         method: 'POST',
         signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
           model: this.model,
           prompt,
-          stream: false,
+
+          // Stream the Ollama response so Node receives HTTP headers
+          // immediately instead of waiting for the complete generation.
+          stream: true,
+
+          // Keep the generated content JSON-only.
           format: 'json',
+
           keep_alive: '30m',
+
           options: {
             temperature: 0.3,
-            num_ctx: 8192,
+            num_ctx: 4096,
             num_predict: OLLAMA_NUM_PREDICT,
           },
         }),
       });
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'TimeoutError') {
+      console.error('========== OLLAMA REQUEST FAILED ==========');
+      console.error('URL:', `${this.baseUrl}/api/generate`);
+      console.error(
+        'Error:',
+        error instanceof Error ? error.message : error,
+      );
+      console.error(
+        'Cause:',
+        error instanceof Error ? error.cause : undefined,
+      );
+      console.error('============================================');
+
+      if (
+        error instanceof DOMException &&
+        error.name === 'TimeoutError'
+      ) {
         throw new InternalServerErrorException(
-          `Ollama did not finish within ${OLLAMA_TIMEOUT_MS / 1000} seconds. Try a shorter source, or retry after the current local model request finishes.`,
+          `Ollama did not finish within ${
+            OLLAMA_TIMEOUT_MS / 1000
+          } seconds.`,
         );
       }
 
       throw new InternalServerErrorException(
-        `Could not reach Ollama at ${this.baseUrl}. Is 'ollama serve' running?`,
+        `Ollama request failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
     }
 
     if (!response.ok) {
+      let errorBody = '';
+
+      try {
+        errorBody = await response.text();
+      } catch {
+        // Ignore response-body parsing errors.
+      }
+
       throw new InternalServerErrorException(
-        `Ollama returned an error: ${response.status}`,
+        `Ollama returned an error: ${response.status}${
+          errorBody ? ` - ${errorBody}` : ''
+        }`,
       );
     }
 
-    const data = (await response.json()) as { response?: string };
-    if (!data?.response) {
+    if (!response.body) {
+      throw new InternalServerErrorException(
+        'Ollama returned an empty response stream',
+      );
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    let buffer = '';
+    let generatedText = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+
+        // The final element may be an incomplete JSON line. Keep it
+        // for the next network chunk.
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+
+          if (!trimmedLine) {
+            continue;
+          }
+
+          let chunk: {
+            response?: string;
+            done?: boolean;
+            error?: string;
+          };
+
+          try {
+            chunk = JSON.parse(trimmedLine) as {
+              response?: string;
+              done?: boolean;
+              error?: string;
+            };
+          } catch (error) {
+            console.error(
+              'Failed to parse Ollama stream chunk:',
+              trimmedLine,
+            );
+
+            throw new Error(
+              `Invalid JSON received from Ollama stream: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+
+          if (chunk.error) {
+            throw new Error(chunk.error);
+          }
+
+          if (chunk.response) {
+            generatedText += chunk.response;
+          }
+        }
+      }
+
+      // Flush any remaining decoder state.
+      buffer += decoder.decode();
+
+      // Process the final buffered JSON object, if any.
+      const finalLine = buffer.trim();
+
+      if (finalLine) {
+        let chunk: {
+          response?: string;
+          done?: boolean;
+          error?: string;
+        };
+
+        try {
+          chunk = JSON.parse(finalLine) as {
+            response?: string;
+            done?: boolean;
+            error?: string;
+          };
+        } catch (error) {
+          throw new Error(
+            `Invalid final JSON received from Ollama stream: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+
+        if (chunk.error) {
+          throw new Error(chunk.error);
+        }
+
+        if (chunk.response) {
+          generatedText += chunk.response;
+        }
+      }
+    } catch (error) {
+      console.error('========== OLLAMA STREAM FAILED ==========');
+      console.error(
+        'Error:',
+        error instanceof Error ? error.message : error,
+      );
+      console.error('==========================================');
+
+      if (
+        error instanceof DOMException &&
+        error.name === 'TimeoutError'
+      ) {
+        throw new InternalServerErrorException(
+          `Ollama did not finish within ${
+            OLLAMA_TIMEOUT_MS / 1000
+          } seconds.`,
+        );
+      }
+
+      throw new InternalServerErrorException(
+        `Ollama stream failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (!generatedText.trim()) {
       throw new InternalServerErrorException(
         'Ollama returned an empty response',
       );
     }
 
-    return data.response;
+    return generatedText;
   }
 
   // ============================================================
